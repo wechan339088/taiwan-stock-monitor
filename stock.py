@@ -9,61 +9,60 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="台股極速監測", layout="wide")
 
 st.title("🔥 台股個股極速監測站 (雙引擎版)")
-st.write("✨ 系統狀態：排除 ETF / 雙分頁設計 / 零延遲即時連線")
+st.write("✨ 系統狀態：排除 ETF / 雙分頁設計 / 零延遲連線 / 🛡️證交所防呆保護")
 
 tab1, tab2 = st.tabs(["⚡ 第一頁：即時爆量監測 (大於1.3倍)", "🚀 第二頁：近3日漲幅排行"])
 
-# 1. 抓取全市場代碼 (完全排除 ETF，只留 4 碼純數字個股)
+# 1. 抓取全市場代碼 (加入防護罩 `try...except`)
 @st.cache_data(ttl=86400)
 def get_stock_list():
     url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-    res = requests.get(url, verify=False)
-    data = res.json()
-    return {item['Code']: item['Name'] for item in data if len(item['Code']) == 4 and item['Code'].isdigit()}
+    try:
+        # 設定 timeout 防止無窮等待
+        res = requests.get(url, verify=False, timeout=10)
+        data = res.json()
+        return {item['Code']: item['Name'] for item in data if len(item['Code']) == 4 and item['Code'].isdigit()}
+    except Exception:
+        # 如果證交所給錯資料，回傳空清單，不讓程式當機
+        return {}
 
-# 2. 批量下載歷史資料 (5MA 與 漲跌幅一次算完，速度極快)
+# 2. 批量下載歷史資料
 @st.cache_data(ttl=43200)
 def get_historical_data(stock_dict):
+    if not stock_dict: return {}, {}
     codes = list(stock_dict.keys())
     tickers = [f"{code}.TW" for code in codes]
     
-    # 啟動黑科技：一次下載全市場歷史資料
     df = yf.download(tickers, period="6d", progress=False)
-    
     ma5_dict = {}
     perf_dict = {}
     
     try:
         vol_df = df['Volume']
         close_df = df['Close']
-        
         for code in codes:
             ticker = f"{code}.TW"
             if ticker in vol_df.columns and ticker in close_df.columns:
-                # 計算 5MA
                 vols = vol_df[ticker].dropna()[:-1]
-                if len(vols) >= 4:
-                    ma5_dict[code] = vols.mean() / 1000
+                if len(vols) >= 4: ma5_dict[code] = vols.mean() / 1000
                 
-                # 計算近 3 日漲幅
                 closes = close_df[ticker].dropna()
                 if len(closes) >= 4:
                     old_price = float(closes.iloc[-4])
                     latest_price = float(closes.iloc[-1])
                     if old_price > 0:
-                        pct_change = ((latest_price - old_price) / old_price) * 100
                         perf_dict[code] = {
                             "old": old_price,
                             "new": latest_price,
-                            "pct": pct_change
+                            "pct": ((latest_price - old_price) / old_price) * 100
                         }
     except Exception:
         pass
-        
     return ma5_dict, perf_dict
 
 # 3. 批量抓取證交所即時量
 def get_live_volumes(codes):
+    if not codes: return {}
     live_dict = {}
     chunk_size = 50 
     for i in range(0, len(codes), chunk_size):
@@ -71,7 +70,7 @@ def get_live_volumes(codes):
         query_str = "|".join([f"tse_{c}.tw" for c in chunk])
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={query_str}"
         try:
-            res = requests.get(url, verify=False)
+            res = requests.get(url, verify=False, timeout=5)
             data = res.json()
             if 'msgArray' in data:
                 for item in data['msgArray']:
@@ -83,6 +82,12 @@ def get_live_volumes(codes):
 # --- 主程式執行區 ---
 with st.spinner("⚡ 系統極速運算中，正在載入全市場個股數據..."):
     stock_dict = get_stock_list()
+    
+    # 【防呆攔截點】如果抓不到資料，就暫停執行並顯示友好提示
+    if not stock_dict:
+        st.error("❌ 目前無法連線至證交所伺服器 (可能逢夜間系統維護或過載)。請稍後重新整理網頁！")
+        st.stop()
+        
     ma5_dict, perf_dict = get_historical_data(stock_dict)
 
 # ================= 第一頁：爆量監測 =================
